@@ -18,7 +18,7 @@ public class DingTalkCommandReceiver implements DingTalkStreamClient.MessageCall
     private final Handler mainHandler;
 
     public interface CommandListener {
-        void onRecordCommand(String conversationId, String conversationType, String userId);
+        void onRecordCommand(String conversationId, String conversationType, String userId, int durationSeconds);
         void onConnectionStatusChanged(boolean connected);
     }
 
@@ -48,17 +48,21 @@ public class DingTalkCommandReceiver implements DingTalkStreamClient.MessageCall
         // 解析指令
         String command = parseCommand(text);
 
-        if ("录制".equals(command) || "record".equalsIgnoreCase(command)) {
-            Log.d(TAG, "收到录制指令");
+        // 解析录制时长（秒）
+        int durationSeconds = parseRecordDuration(command);
+
+        if (command.startsWith("录制") || command.toLowerCase().startsWith("record")) {
+            Log.d(TAG, "收到录制指令，时长: " + durationSeconds + " 秒");
 
             // 发送确认消息，传递 conversationType 和 senderUserId
-            sendResponse(conversationId, conversationType, senderUserId, "收到录制指令，开始录制 1 分钟视频...");
+            String confirmMsg = String.format("收到录制指令，开始录制 %d 秒视频...", durationSeconds);
+            sendResponse(conversationId, conversationType, senderUserId, confirmMsg);
 
-            // 通知监听器执行录制，传递 conversationType 和 senderUserId
-            mainHandler.post(() -> listener.onRecordCommand(conversationId, conversationType, senderUserId));
+            // 通知监听器执行录制，传递 conversationType、senderUserId 和时长
+            mainHandler.post(() -> listener.onRecordCommand(conversationId, conversationType, senderUserId, durationSeconds));
         } else {
             Log.d(TAG, "未识别的指令: " + command);
-            sendResponse(conversationId, conversationType, senderUserId, "未识别的指令。请发送「录制」开始录制视频。");
+            sendResponse(conversationId, conversationType, senderUserId, "未识别的指令。请发送「录制」或「录制+数字」开始录制视频（如：录制30 表示录制30秒，默认60秒）。");
         }
     }
 
@@ -79,6 +83,38 @@ public class DingTalkCommandReceiver implements DingTalkStreamClient.MessageCall
         // 移除 @xxx 部分
         String command = text.replaceAll("@\\S+\\s*", "").trim();
         return command;
+    }
+
+    /**
+     * 解析录制时长（秒）
+     * 支持格式：录制、录制30、录制 30、record、record 30
+     * 默认返回 60 秒（1分钟）
+     */
+    private int parseRecordDuration(String command) {
+        if (command == null || command.isEmpty()) {
+            return 60;
+        }
+
+        // 移除"录制"或"record"关键字，提取数字
+        String durationStr = command.replaceAll("(?i)(录制|record)", "").trim();
+
+        if (durationStr.isEmpty()) {
+            return 60; // 默认 1 分钟
+        }
+
+        try {
+            int duration = Integer.parseInt(durationStr);
+            // 限制范围：最少 5 秒，最多 600 秒（10分钟）
+            if (duration < 5) {
+                return 5;
+            } else if (duration > 600) {
+                return 600;
+            }
+            return duration;
+        } catch (NumberFormatException e) {
+            Log.w(TAG, "无法解析录制时长: " + durationStr + "，使用默认值 60 秒");
+            return 60;
+        }
     }
 
     /**

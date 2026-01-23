@@ -702,14 +702,14 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * 远程录制（由钉钉指令触发）
-     * 自动录制 1 分钟视频并上传到钉钉
+     * 自动录制指定时长视频并上传到钉钉
      */
-    public void startRemoteRecording(String conversationId, String conversationType, String userId) {
+    public void startRemoteRecording(String conversationId, String conversationType, String userId, int durationSeconds) {
         this.remoteConversationId = conversationId;
         this.remoteConversationType = conversationType;
         this.remoteUserId = userId;
 
-        Log.d(TAG, "收到远程录制指令，开始录制 1 分钟视频...");
+        Log.d(TAG, "收到远程录制指令，开始录制 " + durationSeconds + " 秒视频...");
 
         // 如果正在录制，先停止
         if (cameraManager != null && cameraManager.isRecording()) {
@@ -727,9 +727,9 @@ public class MainActivity extends AppCompatActivity {
             if (success) {
                 Log.d(TAG, "远程录制已开始");
 
-                // 设置 1 分钟后自动停止
+                // 设置指定时长后自动停止
                 autoStopRunnable = () -> {
-                    Log.d(TAG, "1 分钟录制完成，正在停止...");
+                    Log.d(TAG, durationSeconds + " 秒录制完成，正在停止...");
                     cameraManager.stopRecording();
 
                     // 等待录制完全停止
@@ -738,7 +738,7 @@ public class MainActivity extends AppCompatActivity {
                     }, 1000);
                 };
 
-                autoStopHandler.postDelayed(autoStopRunnable, 60 * 1000);  // 60 秒
+                autoStopHandler.postDelayed(autoStopRunnable, durationSeconds * 1000L);  // 转换为毫秒
             } else {
                 Log.e(TAG, "远程录制启动失败");
                 sendErrorToRemote("录制启动失败");
@@ -985,8 +985,8 @@ public class MainActivity extends AppCompatActivity {
         // 创建指令回调
         DingTalkStreamManager.CommandCallback commandCallback = new DingTalkStreamManager.CommandCallback() {
             @Override
-            public void onRecordCommand(String conversationId, String conversationType, String userId) {
-                startRemoteRecording(conversationId, conversationType, userId);
+            public void onRecordCommand(String conversationId, String conversationType, String userId, int durationSeconds) {
+                startRemoteRecording(conversationId, conversationType, userId, durationSeconds);
             }
 
             @Override
