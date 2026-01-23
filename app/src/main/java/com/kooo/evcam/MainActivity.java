@@ -2,14 +2,11 @@ package com.kooo.evcam;
 
 import android.Manifest;
 import android.content.Context;
-import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.util.Log;
 import android.view.TextureView;
 import android.view.View;
@@ -96,13 +93,6 @@ public class MainActivity extends AppCompatActivity {
     private DingTalkApiClient dingTalkApiClient;
     private DingTalkStreamManager dingTalkStreamManager;
 
-    // 摄像头健康检查相关
-    private android.os.Handler healthCheckHandler;
-    private Runnable healthCheckRunnable;
-    private static final long HEALTH_CHECK_INTERVAL = 30000;  // 30秒检查一次
-    private int consecutiveFailures = 0;  // 连续失败次数
-    private static final int MAX_CONSECUTIVE_FAILURES = 3;  // 最多3次失败后强制重启
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -124,17 +114,11 @@ public class MainActivity extends AppCompatActivity {
         // 初始化自动停止 Handler
         autoStopHandler = new android.os.Handler(android.os.Looper.getMainLooper());
 
-        // 初始化健康检查 Handler
-        healthCheckHandler = new android.os.Handler(android.os.Looper.getMainLooper());
-
         // 权限检查，但不立即初始化摄像头
         // 等待TextureView准备好后再初始化
         if (!checkPermissions()) {
             requestPermissions();
         }
-
-        // 检查并请求系统窗口权限（用于后台使用摄像头）
-        checkAndRequestOverlayPermission();
 
         // 如果启用了自动启动，启动钉钉服务
         if (dingTalkConfig.isConfigured() && dingTalkConfig.isAutoStart()) {
@@ -340,24 +324,6 @@ public class MainActivity extends AppCompatActivity {
     private void requestPermissions() {
         Log.d(TAG, "Requesting permissions...");
         ActivityCompat.requestPermissions(this, getRequiredPermissions(), REQUEST_PERMISSIONS);
-    }
-
-    /**
-     * 检查并请求系统窗口权限（用于后台使用摄像头）
-     */
-    private void checkAndRequestOverlayPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (!Settings.canDrawOverlays(this)) {
-                Log.d(TAG, "System overlay permission not granted, requesting...");
-                Toast.makeText(this, "需要授予\"显示在其他应用上层\"权限以支持后台拍照", Toast.LENGTH_LONG).show();
-
-                Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:" + getPackageName()));
-                startActivityForResult(intent, 1234);
-            } else {
-                Log.d(TAG, "System overlay permission already granted");
-            }
-        }
     }
 
     @Override
@@ -572,12 +538,10 @@ public class MainActivity extends AppCompatActivity {
                 } else if (cameraIds.length >= 2) {
                     // 只有2个摄像头，使用前两个位置
                     cameraManager.initCameras(
-                            cameraIds[0], textureFront,
-                            cameraIds[1], textureBack,
                             cameraIds[0], textureLeft,  // 复用第一个
-                            cameraIds[1], textureRight  // 复用第二个
-
-
+                            cameraIds[1], textureRight,  // 复用第二个
+                            cameraIds[0], textureFront,
+                            cameraIds[1], textureBack
 
 
                     );
@@ -599,9 +563,6 @@ public class MainActivity extends AppCompatActivity {
 
                 Log.d(TAG, "Camera initialized with " + cameraIds.length + " cameras");
                 Toast.makeText(this, "已打开 " + cameraIds.length + " 个摄像头", Toast.LENGTH_SHORT).show();
-
-                // 启动健康检查
-                startCameraHealthCheck();
 
             } catch (CameraAccessException e) {
                 Log.e(TAG, "Failed to access camera", e);
@@ -790,47 +751,38 @@ public class MainActivity extends AppCompatActivity {
 
         Log.d(TAG, "收到远程录制指令，开始录制 " + durationSeconds + " 秒视频...");
 
-        // 简化版本：直接开始录制（不使用前台服务和透明Activity）
-        // 确保摄像头已打开
+        // 如果正在录制，先停止
+        if (cameraManager != null && cameraManager.isRecording()) {
+            cameraManager.stopRecording();
+            try {
+                Thread.sleep(500);  // 等待停止完成
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
+        // 开始录制
         if (cameraManager != null) {
-            // 先打开所有摄像头（如果未打开）
-            Log.d(TAG, "开始打开摄像头...");
-            cameraManager.openAllCameras();
+            boolean success = cameraManager.startRecording();
+            if (success) {
+                Log.d(TAG, "远程录制已开始");
 
-            // 等待摄像头打开完成（延迟3秒）
-            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                // 如果正在录制，先停止
-                if (cameraManager.isRecording()) {
+                // 设置指定时长后自动停止
+                autoStopRunnable = () -> {
+                    Log.d(TAG, durationSeconds + " 秒录制完成，正在停止...");
                     cameraManager.stopRecording();
-                    try {
-                        Thread.sleep(500);  // 等待停止完成
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
-                }
 
-                // 开始录制
-                boolean success = cameraManager.startRecording();
-                if (success) {
-                    Log.d(TAG, "远程录制已开始");
+                    // 等待录制完全停止
+                    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                        uploadRecordedVideos();
+                    }, 1000);
+                };
 
-                    // 设置指定时长后自动停止
-                    autoStopRunnable = () -> {
-                        Log.d(TAG, durationSeconds + " 秒录制完成，正在停止...");
-                        cameraManager.stopRecording();
-
-                        // 等待录制完全停止
-                        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                            uploadRecordedVideos();
-                        }, 1000);
-                    };
-
-                    autoStopHandler.postDelayed(autoStopRunnable, durationSeconds * 1000L);  // 转换为毫秒
-                } else {
-                    Log.e(TAG, "远程录制启动失败");
-                    sendErrorToRemote("录制启动失败");
-                }
-            }, 3000);  // 等待3秒让摄像头完全打开
+                autoStopHandler.postDelayed(autoStopRunnable, durationSeconds * 1000L);  // 转换为毫秒
+            } else {
+                Log.e(TAG, "远程录制启动失败");
+                sendErrorToRemote("录制启动失败");
+            }
         } else {
             Log.e(TAG, "摄像头未初始化");
             sendErrorToRemote("摄像头未初始化");
@@ -848,24 +800,15 @@ public class MainActivity extends AppCompatActivity {
 
         Log.d(TAG, "收到远程拍照指令，开始拍照...");
 
-        // 简化版本：直接拍照（不使用前台服务和透明Activity）
-        // 确保摄像头已打开
+        // 拍照
         if (cameraManager != null) {
-            // 先打开所有摄像头（如果未打开）
-            Log.d(TAG, "开始打开摄像头...");
-            cameraManager.openAllCameras();
+            cameraManager.takePicture();
+            Log.d(TAG, "远程拍照已执行");
 
-            // 等待摄像头打开完成（延迟3秒）
+            // 等待拍照完成后上传
             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                // 拍照
-                cameraManager.takePicture();
-                Log.d(TAG, "远程拍照已执行");
-
-                // 等待拍照完成后上传
-                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                    uploadPhotos();
-                }, 2000);  // 等待2秒确保照片保存完成
-            }, 3000);  // 等待3秒让摄像头完全打开
+                uploadPhotos();
+            }, 2000);  // 等待2秒确保照片保存完成
         } else {
             Log.e(TAG, "摄像头未初始化");
             sendErrorToRemote("摄像头未初始化");
@@ -1144,100 +1087,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * 启动摄像头健康检查（简化版本）
-     */
-    private void startCameraHealthCheck() {
-        if (healthCheckRunnable != null) {
-            // 已经在运行，先停止
-            stopCameraHealthCheck();
-        }
-
-        Log.d(TAG, "Starting camera health check (every " + (HEALTH_CHECK_INTERVAL / 1000) + " seconds)");
-
-        healthCheckRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (cameraManager != null) {
-                    // 简化版本：只记录日志，不执行复杂的健康检查
-                    Log.d(TAG, "Camera health check running...");
-                }
-
-                // 继续下一次检查
-                if (healthCheckRunnable != null) {
-                    healthCheckHandler.postDelayed(this, HEALTH_CHECK_INTERVAL);
-                }
-            }
-        };
-
-        // 首次延迟10秒后开始检查（给摄像头足够的初始化时间）
-        healthCheckHandler.postDelayed(healthCheckRunnable, 10000);
-    }
-
-    /**
-     * 停止摄像头健康检查
-     */
-    private void stopCameraHealthCheck() {
-        if (healthCheckHandler != null && healthCheckRunnable != null) {
-            healthCheckHandler.removeCallbacks(healthCheckRunnable);
-            healthCheckRunnable = null;
-            Log.d(TAG, "Camera health check stopped");
-        }
-    }
-
-    @Override
-    protected void onPause() {
-        super.onPause();
-        Log.d(TAG, "onPause: App going to background");
-
-        // 停止健康检查
-        stopCameraHealthCheck();
-
-        // 检查实际录制状态（包括 UI 录制和远程录制）
-        boolean actuallyRecording = cameraManager != null && cameraManager.isRecording();
-
-        // 如果正在录制（UI 或远程），保持摄像头打开
-        if (actuallyRecording) {
-            Log.d(TAG, "Recording in progress (UI or remote), keeping cameras open");
-            // 不做任何操作，保持录制
-        }
-        // 如果没有录制，完全释放摄像头资源，让其他应用可以使用
-        else if (cameraManager != null) {
-            Log.d(TAG, "Not recording, closing cameras for other apps");
-            // 关闭所有摄像头
-            cameraManager.closeAllCameras();
-        }
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        Log.d(TAG, "onResume: App coming to foreground");
-
-        // 检查实际录制状态（包括 UI 录制和远程录制）
-        boolean actuallyRecording = cameraManager != null && cameraManager.isRecording();
-
-        // 如果没有录制，重新打开摄像头
-        if (cameraManager != null && !actuallyRecording) {
-            Log.d(TAG, "Reopening cameras for foreground");
-            cameraManager.openAllCameras();
-
-            // 延迟启动健康检查（给摄像头时间打开）
-            healthCheckHandler.postDelayed(() -> {
-                startCameraHealthCheck();
-            }, 5000);
-        } else if (actuallyRecording) {
-            // 如果正在录制，立即恢复健康检查
-            startCameraHealthCheck();
-        }
-    }
-
     @Override
     protected void onDestroy() {
         super.onDestroy();
-
-        // 停止健康检查
-        stopCameraHealthCheck();
 
         // 取消自动停止录制的任务
         if (autoStopHandler != null && autoStopRunnable != null) {
