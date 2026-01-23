@@ -673,7 +673,7 @@ public class MainActivity extends AppCompatActivity {
                     } else {
                         btnStartRecord.setTextColor(0xFF00FF00);  // 亮绿色
                     }
-                    blinkHandler.postDelayed(this, 500);  // 每500ms闪烁一次
+                    blinkHandler.postDelayed(this, 1000);  // 每500ms闪烁一次
                 }
             }
         };

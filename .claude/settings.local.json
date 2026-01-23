@@ -24,7 +24,8 @@
       "Bash(adb logcat:*)",
       "Bash(adb shell:*)",
       "Bash(timeout:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(git config:*)"
     ],
     "deny": [],
     "ask": []
