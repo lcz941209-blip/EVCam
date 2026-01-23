@@ -73,6 +73,35 @@ public class SingleCamera {
 
     public void setCameraPosition(String position) {
         this.cameraPosition = position;
+
+        // 如果是后摄像头，应用左右镜像变换
+        if ("back".equals(position) && textureView != null) {
+            applyMirrorTransform();
+        }
+    }
+
+    /**
+     * 应用左右镜像变换到TextureView
+     */
+    private void applyMirrorTransform() {
+        if (textureView == null) {
+            return;
+        }
+
+        // 在主线程中执行UI操作
+        textureView.post(() -> {
+            android.graphics.Matrix matrix = new android.graphics.Matrix();
+
+            // 获取TextureView的中心点
+            float centerX = textureView.getWidth() / 2f;
+            float centerY = textureView.getHeight() / 2f;
+
+            // 应用水平镜像：scaleX = -1
+            matrix.setScale(-1f, 1f, centerX, centerY);
+
+            textureView.setTransform(matrix);
+            Log.d(TAG, "Camera " + cameraId + " (back) applied mirror transform");
+        });
     }
 
     public String getCameraId() {
@@ -418,6 +447,11 @@ public class SingleCamera {
                 Log.d(TAG, "Camera " + cameraId + " buffer size set to: " + previewSize);
             } else {
                 Log.e(TAG, "Camera " + cameraId + " Cannot set buffer size - previewSize: " + previewSize + ", SurfaceTexture: " + surfaceTexture);
+            }
+
+            // 如果是后摄像头，确保应用镜像变换
+            if ("back".equals(cameraPosition)) {
+                applyMirrorTransform();
             }
 
             // 创建预览请求

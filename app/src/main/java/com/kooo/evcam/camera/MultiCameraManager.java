@@ -66,6 +66,10 @@ public class MultiCameraManager {
         this.maxOpenCameras = Math.max(1, maxOpenCameras);
     }
 
+    public boolean hasCameras() {
+        return !cameras.isEmpty();
+    }
+
     /**
      * 初始化摄像头
      */
