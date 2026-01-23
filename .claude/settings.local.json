@@ -17,7 +17,8 @@
       "Bash(for:*)",
       "Bash(do git mv:*)",
       "Bash(done)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(adb uninstall:*)"
     ],
     "deny": [],
     "ask": []
