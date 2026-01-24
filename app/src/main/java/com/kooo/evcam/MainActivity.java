@@ -27,9 +27,7 @@ import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentManager;
 import androidx.fragment.app.FragmentTransaction;
 
-import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.navigation.NavigationView;
-import com.google.android.material.switchmaterial.SwitchMaterial;
 import com.kooo.evcam.camera.MultiCameraManager;
 import com.kooo.evcam.dingtalk.DingTalkApiClient;
 import com.kooo.evcam.dingtalk.DingTalkConfig;
@@ -247,7 +245,7 @@ public class MainActivity extends AppCompatActivity {
                 // 显示远程查看界面
                 showRemoteViewInterface();
             } else if (itemId == R.id.nav_settings) {
-                showSettingsDialog();
+                showSettingsInterface();
             }
             drawerLayout.closeDrawer(GravityCompat.START);
             return true;
@@ -317,32 +315,19 @@ public class MainActivity extends AppCompatActivity {
         transaction.commit();
     }
 
-    private void showSettingsDialog() {
-        View view = getLayoutInflater().inflate(R.layout.dialog_settings, null);
-        SwitchMaterial debugSwitch = view.findViewById(R.id.switch_debug_to_info);
-        Button saveLogsButton = view.findViewById(R.id.btn_save_logs);
+    /**
+     * 显示软件设置界面
+     */
+    private void showSettingsInterface() {
+        // 隐藏录制布局，显示Fragment容器
+        recordingLayout.setVisibility(View.GONE);
+        fragmentContainer.setVisibility(View.VISIBLE);
 
-        debugSwitch.setChecked(AppLog.isDebugToInfoEnabled(this));
-        debugSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            AppLog.setDebugToInfoEnabled(this, isChecked);
-            String message = isChecked ? "Debug logs will show as info" : "Debug logs will show as debug";
-            Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
-        });
-
-        saveLogsButton.setOnClickListener(v -> {
-            File logFile = AppLog.saveLogsToFile(this);
-            if (logFile != null) {
-                Toast.makeText(this, "Logs saved to: " + logFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
-            } else {
-                Toast.makeText(this, "Failed to save logs", Toast.LENGTH_SHORT).show();
-            }
-        });
-
-        new MaterialAlertDialogBuilder(this)
-            .setTitle("软件设置")
-            .setView(view)
-            .setPositiveButton("Close", null)
-            .show();
+        // 显示SettingsFragment
+        FragmentManager fragmentManager = getSupportFragmentManager();
+        FragmentTransaction transaction = fragmentManager.beginTransaction();
+        transaction.replace(R.id.fragment_container, new SettingsFragment());
+        transaction.commit();
     }
 
 

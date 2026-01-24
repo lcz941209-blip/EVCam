@@ -13,7 +13,7 @@
     <color name="menu_background">#FFD4DBE6</color>
     <color name="button_background">#FFF9FAFB</color>
     <color name="button_text">#FF1A1A1A</color>
-    <color name="page_background">#FFFFFFFF</color>
+    <color name="page_background">#FFD4DBE6</color>
     <color name="card_background">#FFF9FAFB</color>
     <color name="text_primary">#FF1A1A1A</color>
     <color name="text_secondary">#FF666666</color>

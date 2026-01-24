@@ -14,4 +14,9 @@
         <item name="android:statusBarColor">#2A2A2A</item>
         <item name="android:navigationBarColor">#000000</item>
     </style>
+
+    <!-- 导航菜单项文字样式 -->
+    <style name="NavigationMenuTextAppearance" parent="TextAppearance.AppCompat.Body1">
+        <item name="android:textSize">18sp</item>
+    </style>
 </resources>

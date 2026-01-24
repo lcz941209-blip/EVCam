@@ -46,13 +46,13 @@
                     android:layout_gravity="center" />
 
                 <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:layout_gravity="top|start"
                     android:layout_marginStart="15dp"
                     android:layout_marginTop="8dp"
-                    android:background="#80000000"
-                    android:padding="8dp"
+                    android:background="@drawable/camera_label_background"
+                    android:gravity="center"
                     android:text="前"
                     android:textColor="#FFFFFF"
                     android:textSize="16sp" />
@@ -78,13 +78,13 @@
                     android:layout_marginBottom="-16dp" />
 
                 <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:layout_gravity="top|start"
                     android:layout_marginStart="15dp"
                     android:layout_marginTop="8dp"
-                    android:background="#80000000"
-                    android:padding="8dp"
+                    android:background="@drawable/camera_label_background"
+                    android:gravity="center"
                     android:text="后"
                     android:textColor="#FFFFFF"
                     android:textSize="16sp" />
@@ -196,13 +196,13 @@
                     android:layout_gravity="bottom" />
 
                 <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:layout_gravity="bottom|start"
                     android:layout_marginStart="15dp"
                     android:layout_marginBottom="8dp"
-                    android:background="#80000000"
-                    android:padding="8dp"
+                    android:background="@drawable/camera_label_background"
+                    android:gravity="center"
                     android:text="左"
                     android:textColor="#FFFFFF"
                     android:textSize="16sp" />
@@ -226,13 +226,13 @@
                     android:layout_gravity="bottom" />
 
                 <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:layout_gravity="bottom|start"
                     android:layout_marginStart="15dp"
                     android:layout_marginBottom="8dp"
-                    android:background="#80000000"
-                    android:padding="8dp"
+                    android:background="@drawable/camera_label_background"
+                    android:gravity="center"
                     android:text="右"
                     android:textColor="#FFFFFF"
                     android:textSize="16sp" />
@@ -258,6 +258,8 @@
         android:layout_gravity="start"
         android:fitsSystemWindows="false"
         app:headerLayout="@layout/nav_header"
-        app:menu="@menu/navigation_menu" />
+        app:menu="@menu/navigation_menu"
+        app:itemTextAppearance="@style/NavigationMenuTextAppearance"
+        app:itemIconSize="28dp" />
 
 </androidx.drawerlayout.widget.DrawerLayout>
