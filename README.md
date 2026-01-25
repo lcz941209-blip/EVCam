@@ -10,8 +10,9 @@
   <p>
     <img src="https://img.shields.io/badge/Android-9.0+-green?style=flat-square&logo=android" alt="Android"/>
     <img src="https://img.shields.io/badge/API-28+-brightgreen?style=flat-square" alt="API"/>
-    <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License"/>
-    <img src="https://img.shields.io/badge/Language-Java-orange?style=flat-square&logo=java" alt="Java"/>
+    <img src="https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey?style=flat-square" alt="License"/>
+    <img src="https://img.shields.io/badge/Commercial-Contact%20Author-orange?style=flat-square" alt="Commercial"/>
+    <img src="https://img.shields.io/badge/Language-Java-red?style=flat-square&logo=openjdk&logoColor=white" alt="Java"/>
   </p>
 </div>
 
@@ -150,10 +151,7 @@ adb install app\build\outputs\apk\debug\app-debug.apk
 
 ### 首次启动
 
-1. **授予权限** - 应用启动时会请求以下权限：
-   - 📷 摄像头权限
-   - 🎤 麦克风权限
-   - 💾 存储权限（Android 12 及以下）
+1. **授予权限** - 请务必使用“应用管家”或其它权限管理软件，授予EVCam所有需要的权限
 
 2. **摄像头预览** - 权限授予后，应用会自动初始化摄像头并显示预览
 
@@ -413,7 +411,19 @@ gradlew.bat connectedAndroidTest
 
 ## 📄 许可证
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+本项目采用 **双重许可** 模式：
+
+### 非商业使用
+- 📜 **CC BY-NC-SA 4.0**（知识共享署名-非商业性使用-相同方式共享 4.0）
+- ✅ 允许个人学习、研究、非商业使用
+- ✅ 允许修改和分发（需保持相同许可）
+- ❌ 禁止任何商业用途
+
+### 商业使用
+- 💼 如需商业授权，请联系作者获取商业许可证
+- 📧 微信：greenteacher46（请备注"EVCam商业合作"）
+
+详细条款请参阅 [LICENSE](LICENSE) 文件。
 
 ---
 
