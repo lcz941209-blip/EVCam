@@ -151,8 +151,8 @@ public class EglSurfaceEncoder {
     private int watermarkOesTextureHandle;
     private Bitmap watermarkBitmap;
     private String lastWatermarkTime = "";
-    private static final int WATERMARK_WIDTH = 320;   // 水印纹理宽度
-    private static final int WATERMARK_HEIGHT = 40;   // 水印纹理高度
+    private static final int WATERMARK_WIDTH = 400;   // 水印纹理宽度（需容纳19字符的时间戳）
+    private static final int WATERMARK_HEIGHT = 44;   // 水印纹理高度
     private final SimpleDateFormat watermarkDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
 
     public EglSurfaceEncoder(String cameraId, int width, int height) {
@@ -368,8 +368,9 @@ public class EglSurfaceEncoder {
 
         try {
             // 销毁旧的 EGL Surface
+            // 注意：当 surface 为 EGL_NO_SURFACE 时，context 必须也是 EGL_NO_CONTEXT，否则会报 EGL_BAD_MATCH
             if (eglSurface != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, eglContext);
+                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
                 EGL14.eglDestroySurface(eglDisplay, eglSurface);
                 eglSurface = EGL14.EGL_NO_SURFACE;
             }
@@ -674,10 +675,10 @@ public class EglSurfaceEncoder {
         textPaint.setAntiAlias(true);
         textPaint.setTypeface(Typeface.MONOSPACE);
 
-        // 绘制阴影
-        canvas.drawText(currentTime, 6, 30, shadowPaint);
+        // 绘制阴影（偏移2像素）
+        canvas.drawText(currentTime, 8, 32, shadowPaint);
         // 绘制主文字
-        canvas.drawText(currentTime, 4, 28, textPaint);
+        canvas.drawText(currentTime, 6, 30, textPaint);
 
         // 上传纹理到 GPU
         if (watermarkTextureId != 0) {

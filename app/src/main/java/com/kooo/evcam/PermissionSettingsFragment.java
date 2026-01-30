@@ -47,6 +47,8 @@ public class PermissionSettingsFragment extends Fragment {
     private Button btnOverlayPermission;
     private TextView tvAccessibilityStatus;
     private Button btnAccessibilityPermission;
+    private TextView tvBatteryStatus;
+    private Button btnBatteryPermission;
 
     @Nullable
     @Override
@@ -69,6 +71,18 @@ public class PermissionSettingsFragment extends Fragment {
         
         // 更新权限状态
         updateAllPermissionStatus();
+
+        // 沉浸式状态栏兼容
+        View toolbar = view.findViewById(R.id.toolbar);
+        if (toolbar != null) {
+            final int originalPaddingTop = toolbar.getPaddingTop();
+            androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(toolbar, (v, insets) -> {
+                int statusBarHeight = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.statusBars()).top;
+                v.setPadding(v.getPaddingLeft(), statusBarHeight + originalPaddingTop, v.getPaddingRight(), v.getPaddingBottom());
+                return insets;
+            });
+            androidx.core.view.ViewCompat.requestApplyInsets(toolbar);
+        }
 
         return view;
     }
@@ -95,6 +109,8 @@ public class PermissionSettingsFragment extends Fragment {
         btnOverlayPermission = view.findViewById(R.id.btn_overlay_permission);
         tvAccessibilityStatus = view.findViewById(R.id.tv_accessibility_status);
         btnAccessibilityPermission = view.findViewById(R.id.btn_accessibility_permission);
+        tvBatteryStatus = view.findViewById(R.id.tv_battery_status);
+        btnBatteryPermission = view.findViewById(R.id.btn_battery_permission);
         
         // 根据系统版本显示/隐藏某些选项
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -137,6 +153,13 @@ public class PermissionSettingsFragment extends Fragment {
         
         // 无障碍服务
         btnAccessibilityPermission.setOnClickListener(v -> openAccessibilitySettings());
+        
+        // 电池优化
+        btnBatteryPermission.setOnClickListener(v -> {
+            if (getContext() != null) {
+                WakeUpHelper.requestIgnoreBatteryOptimizations(getContext());
+            }
+        });
     }
 
     @Override
@@ -159,6 +182,7 @@ public class PermissionSettingsFragment extends Fragment {
         updateAllFilesPermissionStatus();
         updateOverlayPermissionStatus();
         updateAccessibilityServiceStatus();
+        updateBatteryOptimizationStatus();
     }
 
     /**
@@ -274,7 +298,7 @@ public class PermissionSettingsFragment extends Fragment {
             btnAllFilesPermission.setText("已授权");
             btnAllFilesPermission.setEnabled(false);
         } else {
-            tvAllFilesStatus.setText("未授权 - 无法存储到外置SD卡");
+            tvAllFilesStatus.setText("未授权 - 无法存储到U盘");
             tvAllFilesStatus.setTextColor(getResources().getColor(android.R.color.holo_orange_dark, null));
             btnAllFilesPermission.setText("去授权");
             btnAllFilesPermission.setEnabled(true);
@@ -349,6 +373,27 @@ public class PermissionSettingsFragment extends Fragment {
     }
 
     /**
+     * 更新电池优化状态
+     */
+    private void updateBatteryOptimizationStatus() {
+        if (getContext() == null) return;
+        
+        boolean ignored = WakeUpHelper.isIgnoringBatteryOptimizations(getContext());
+        
+        if (ignored) {
+            tvBatteryStatus.setText("已关闭优化 ✓");
+            tvBatteryStatus.setTextColor(getResources().getColor(android.R.color.holo_green_dark, null));
+            btnBatteryPermission.setText("已设置");
+            btnBatteryPermission.setEnabled(false);
+        } else {
+            tvBatteryStatus.setText("优化中 - 应用可能被系统休眠");
+            tvBatteryStatus.setTextColor(getResources().getColor(android.R.color.holo_orange_dark, null));
+            btnBatteryPermission.setText("去设置");
+            btnBatteryPermission.setEnabled(true);
+        }
+    }
+
+    /**
      * 打开应用设置页面
      */
     private void openAppSettings() {
@@ -361,7 +406,7 @@ public class PermissionSettingsFragment extends Fragment {
             Toast.makeText(getContext(), "请在权限列表中授予所需权限", Toast.LENGTH_LONG).show();
         } catch (Exception e) {
             AppLog.e("PermissionSettings", "打开应用设置失败", e);
-            Toast.makeText(getContext(), "无法打开设置页面", Toast.LENGTH_SHORT).show();
+            Toast.makeText(getContext(), "无法打开设置页面，请使用第三方权限管理工具设置", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -400,7 +445,7 @@ public class PermissionSettingsFragment extends Fragment {
                     Toast.makeText(getContext(), "请找到本应用并开启权限", Toast.LENGTH_LONG).show();
                 } catch (Exception e2) {
                     AppLog.e("PermissionSettings", "无法打开权限设置页面", e2);
-                    Toast.makeText(getContext(), "无法打开设置页面", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(getContext(), "无法打开设置页面，请使用第三方权限管理工具设置", Toast.LENGTH_SHORT).show();
                 }
             }
         }
@@ -417,7 +462,7 @@ public class PermissionSettingsFragment extends Fragment {
             Toast.makeText(getContext(), "请找到「电车记录仪 - 保活服务」并启用", Toast.LENGTH_LONG).show();
         } catch (Exception e) {
             AppLog.e("PermissionSettings", "打开无障碍设置失败", e);
-            Toast.makeText(getContext(), "无法打开设置页面", Toast.LENGTH_SHORT).show();
+            Toast.makeText(getContext(), "无法打开设置页面，请使用第三方权限管理工具设置", Toast.LENGTH_SHORT).show();
         }
     }
 }

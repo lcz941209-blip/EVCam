@@ -3,6 +3,7 @@ package com.kooo.evcam.camera;
 
 import com.kooo.evcam.AppConfig;
 import com.kooo.evcam.AppLog;
+import com.kooo.evcam.FileTransferManager;
 import com.kooo.evcam.StorageHelper;
 import android.content.Context;
 import android.os.Environment;
@@ -39,6 +40,16 @@ public class MultiCameraManager {
 
     private boolean isRecording = false;
     private boolean useCodecRecording = false;  // 是否使用软编码录制（用于 L6/L7）
+    private boolean useRelayWrite = false;      // 是否使用中转写入（录制到内部存储，异步传输到U盘）
+    private File finalSaveDir = null;           // 最终存储目录（用于中转写入模式）
+    private volatile int lastNotifiedSegmentIndex = -1;  // 已通知的分段索引，避免重复通知
+    
+    // Watchdog 回退相关
+    private String currentRecordingTimestamp = null;  // 当前录制的时间戳（用于重建时继续录制）
+    private Set<String> currentEnabledCameras = null;  // 当前启用的摄像头集合
+    private int rebuildAttemptCount = 0;  // 重建尝试次数（0=首次, 1=重建MediaRecorder, 2+=回退Codec）
+    private static final int CODEC_FALLBACK_THRESHOLD = 2;  // 触发 Codec 回退的阈值
+    private volatile boolean isRebuildingRecording = false;  // 是否正在重建录制（防止多摄像头并发触发）
     private StatusCallback statusCallback;
     private PreviewSizeCallback previewSizeCallback;
     private volatile int sessionConfiguredCount = 0;
@@ -47,6 +58,11 @@ public class MultiCameraManager {
     private android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private Runnable sessionTimeoutRunnable = null;
     private final Object sessionLock = new Object();  // 用于同步 session 配置计数
+    
+    // 按摄像头维度跟踪配置状态（解决超时强制启动问题）
+    private final Map<String, Boolean> cameraSessionReady = new LinkedHashMap<>();
+    private final Map<String, Boolean> cameraRecordingActive = new LinkedHashMap<>();
+    private RecordingStatusCallback recordingStatusCallback;
 
     public interface StatusCallback {
         void onCameraStatusUpdate(String cameraId, String status);
@@ -60,11 +76,65 @@ public class MultiCameraManager {
         void onSegmentSwitch(int newSegmentIndex);
     }
 
+    /**
+     * 损坏文件删除回调
+     */
+    public interface CorruptedFilesCallback {
+        void onCorruptedFilesDeleted(List<String> deletedFiles);
+    }
+
+    /**
+     * Codec 回退通知回调
+     */
+    public interface CodecFallbackCallback {
+        void onCodecFallback();
+    }
+    
+    /**
+     * 录制状态回调（用于通知部分摄像头录制失败）
+     */
+    public interface RecordingStatusCallback {
+        /**
+         * 当部分摄像头启动录制成功，部分失败时调用
+         * @param activeCameras 成功启动录制的摄像头 key 集合
+         * @param failedCameras 启动录制失败的摄像头 key 集合
+         */
+        void onPartialRecordingStart(Set<String> activeCameras, Set<String> failedCameras);
+    }
+
+    /**
+     * 首次数据写入回调
+     * 用于通知外部录制已真正开始（有数据写入），可以开始计时
+     */
+    public interface FirstDataWrittenCallback {
+        /**
+         * 当任一摄像头首次成功写入数据时调用（只通知一次）
+         */
+        void onFirstDataWritten();
+    }
+
+    /**
+     * 录制时间戳更新回调
+     * 当 Watchdog 触发重建录制时，时间戳会改变，需要通知外部更新
+     */
+    public interface TimestampUpdateCallback {
+        /**
+         * 当录制时间戳更新时调用（通常在 Watchdog 重建后）
+         * @param newTimestamp 新的录制时间戳
+         */
+        void onTimestampUpdated(String newTimestamp);
+    }
+
     public MultiCameraManager(Context context) {
         this.context = context;
     }
     
     private SegmentSwitchCallback segmentSwitchCallback;
+    private CorruptedFilesCallback corruptedFilesCallback;
+    private CodecFallbackCallback codecFallbackCallback;
+    private FirstDataWrittenCallback firstDataWrittenCallback;
+    private TimestampUpdateCallback timestampUpdateCallback;
+    private boolean hasNotifiedFirstDataWritten = false;  // 是否已通知首次写入（每次录制只通知一次）
 
     public void setStatusCallback(StatusCallback callback) {
         this.statusCallback = callback;
@@ -74,8 +144,28 @@ public class MultiCameraManager {
         this.previewSizeCallback = callback;
     }
     
+    public void setCorruptedFilesCallback(CorruptedFilesCallback callback) {
+        this.corruptedFilesCallback = callback;
+    }
+    
+    public void setRecordingStatusCallback(RecordingStatusCallback callback) {
+        this.recordingStatusCallback = callback;
+    }
+    
     public void setSegmentSwitchCallback(SegmentSwitchCallback callback) {
         this.segmentSwitchCallback = callback;
+    }
+
+    public void setCodecFallbackCallback(CodecFallbackCallback callback) {
+        this.codecFallbackCallback = callback;
+    }
+
+    public void setFirstDataWrittenCallback(FirstDataWrittenCallback callback) {
+        this.firstDataWrittenCallback = callback;
+    }
+
+    public void setTimestampUpdateCallback(TimestampUpdateCallback callback) {
+        this.timestampUpdateCallback = callback;
     }
 
     public void setMaxOpenCameras(int maxOpenCameras) {
@@ -224,6 +314,19 @@ public class MultiCameraManager {
                 // 检查是否所有会话都已配置完成（线程安全处理）
                 synchronized (sessionLock) {
                     if (expectedSessionCount > 0) {
+                        // 找到对应的摄像头 key 并标记为就绪
+                        String cameraKey = null;
+                        for (Map.Entry<String, SingleCamera> entry : cameras.entrySet()) {
+                            if (entry.getValue().getCameraId().equals(cameraId)) {
+                                cameraKey = entry.getKey();
+                                break;
+                            }
+                        }
+                        if (cameraKey != null) {
+                            cameraSessionReady.put(cameraKey, true);
+                            AppLog.d(TAG, "Camera " + cameraKey + " (id=" + cameraId + ") session marked as ready");
+                        }
+                        
                         sessionConfiguredCount++;
                         AppLog.d(TAG, "Session configured: " + sessionConfiguredCount + "/" + expectedSessionCount);
 
@@ -237,12 +340,10 @@ public class MultiCameraManager {
                                     mainHandler.removeCallbacks(sessionTimeoutRunnable);
                                     sessionTimeoutRunnable = null;
                                 }
-                                pendingRecordingStart = null;
-                                // 在主线程上执行录制启动，确保线程安全
-                                mainHandler.post(recordingTask);
+                                // 延迟 300ms 再启动录制，让 Camera Session 稳定
+                                // 某些车机设备需要这个延迟才能正确将帧发送到 MediaRecorder Surface
+                                mainHandler.postDelayed(recordingTask, 300);
                             }
-                            sessionConfiguredCount = 0;
-                            expectedSessionCount = 0;
                         }
                     }
                 }
@@ -281,8 +382,8 @@ public class MultiCameraManager {
                                     sessionTimeoutRunnable = null;
                                 }
                                 pendingRecordingStart = null;
-                                // 在主线程上执行录制启动
-                                mainHandler.post(recordingTask);
+                                // 延迟 300ms 再启动录制，让 Camera Session 稳定
+                                mainHandler.postDelayed(recordingTask, 300);
                             }
                             sessionConfiguredCount = 0;
                             expectedSessionCount = 0;
@@ -353,7 +454,22 @@ public class MultiCameraManager {
             }
 
             @Override
-            public void onSegmentSwitch(String cameraId, int newSegmentIndex) {
+            public void onPrepareSegmentSwitch(String cameraId, int currentSegmentIndex) {
+                AppLog.d(TAG, "Prepare segment switch for camera " + cameraId + " (current segment: " + currentSegmentIndex + ")");
+                // 找到对应的 camera 并暂停向录制 Surface 发送帧
+                // 这是为了避免在 MediaRecorder 被释放后继续向旧 Surface 发送帧导致 CAPTURE FAILED
+                for (Map.Entry<String, SingleCamera> entry : cameras.entrySet()) {
+                    if (entry.getValue().getCameraId().equals(cameraId)) {
+                        SingleCamera camera = entry.getValue();
+                        camera.pauseRecordSurface();
+                        AppLog.d(TAG, "Camera " + cameraId + " recording surface paused before segment switch");
+                        break;
+                    }
+                }
+            }
+
+            @Override
+            public void onSegmentSwitch(String cameraId, int newSegmentIndex, String completedFilePath) {
                 AppLog.d(TAG, "Segment switch for camera " + cameraId + " to segment " + newSegmentIndex);
                 // 找到对应的 camera key 和 camera
                 for (Map.Entry<String, SingleCamera> entry : cameras.entrySet()) {
@@ -363,18 +479,56 @@ public class MultiCameraManager {
                         VideoRecorder recorder = recorders.get(key);
 
                         if (camera != null && recorder != null) {
-                            // 更新录制 Surface 并重新创建会话
-                            camera.setRecordSurface(recorder.getSurface());
+                            // 如果使用中转写入，将上一个分段的文件传输到最终目录
+                            if (useRelayWrite && finalSaveDir != null && newSegmentIndex > 0 && completedFilePath != null) {
+                                // 传输已完成的文件（由回调提供确切路径，避免传输正在录制的新文件）
+                                scheduleRelayTransfer(completedFilePath);
+                            }
+                            
+                            // 更新录制 Surface 并重新创建会话（MediaRecorder 模式）
+                            camera.setRecordSurface(recorder.getSurface(), false);
                             camera.recreateSession();
                             AppLog.d(TAG, "Recreated session for camera " + cameraId + " after segment switch");
                         }
                         
-                        // 通知分段切换回调（只通知一次，使用第一个摄像头的分段）
-                        if ("front".equals(key) && segmentSwitchCallback != null) {
+                        // 通知分段切换回调（只通知一次，第一个触发的摄像头会通知）
+                        if (segmentSwitchCallback != null && newSegmentIndex > lastNotifiedSegmentIndex) {
+                            lastNotifiedSegmentIndex = newSegmentIndex;
                             segmentSwitchCallback.onSegmentSwitch(newSegmentIndex);
                         }
                         break;
                     }
+                }
+            }
+
+            @Override
+            public void onCorruptedFilesDeleted(String cameraId, List<String> deletedFiles) {
+                if (deletedFiles != null && !deletedFiles.isEmpty()) {
+                    AppLog.w(TAG, "Corrupted files deleted for camera " + cameraId + ": " + deletedFiles.size() + " file(s)");
+                    for (String file : deletedFiles) {
+                        AppLog.d(TAG, "  Deleted: " + file);
+                    }
+                    // 通知 MainActivity 显示弹窗
+                    if (corruptedFilesCallback != null) {
+                        mainHandler.post(() -> corruptedFilesCallback.onCorruptedFilesDeleted(deletedFiles));
+                    }
+                }
+            }
+
+            @Override
+            public void onRecordingRebuildRequested(String cameraId, String reason) {
+                AppLog.e(TAG, "Recording rebuild requested for camera " + cameraId + ", reason: " + reason);
+                handleRecordingRebuildRequest(cameraId, reason);
+            }
+
+            @Override
+            public void onFirstDataWritten(String cameraId) {
+                AppLog.d(TAG, "First data written for camera " + cameraId);
+                // 只在第一个摄像头首次写入时通知外部（每次录制只通知一次）
+                if (!hasNotifiedFirstDataWritten && firstDataWrittenCallback != null) {
+                    hasNotifiedFirstDataWritten = true;
+                    AppLog.d(TAG, "Notifying external: first data written, recording truly started");
+                    mainHandler.post(() -> firstDataWrittenCallback.onFirstDataWritten());
                 }
             }
         };
@@ -505,9 +659,33 @@ public class MultiCameraManager {
     private boolean startMediaRecorderRecording(String timestamp, Set<String> enabledCameras) {
         AppLog.d(TAG, "Starting MediaRecorder recording with timestamp: " + timestamp);
 
-        File saveDir = StorageHelper.getVideoDir(context);
+        // 重置首次写入通知标志（每次录制只通知一次）
+        hasNotifiedFirstDataWritten = false;
+
+        // 记录当前录制参数（用于 Watchdog 重建）
+        currentRecordingTimestamp = timestamp;
+        currentEnabledCameras = enabledCameras;
+
+        // 检查是否使用中转写入模式
+        AppConfig appConfig = new AppConfig(context);
+        useRelayWrite = appConfig.shouldUseRelayWrite();
+        
+        // 获取录制目录（可能是临时目录或最终目录）
+        File saveDir = StorageHelper.getRecordingDir(context);
         if (!saveDir.exists()) {
             saveDir.mkdirs();
+        }
+        
+        // 如果使用中转写入，记录最终目录
+        if (useRelayWrite) {
+            finalSaveDir = StorageHelper.getFinalVideoDir(context);
+            if (!finalSaveDir.exists()) {
+                finalSaveDir.mkdirs();
+            }
+            AppLog.d(TAG, "Relay write mode: recording to " + saveDir.getAbsolutePath() + 
+                    ", will transfer to " + finalSaveDir.getAbsolutePath());
+        } else {
+            finalSaveDir = null;
         }
 
         List<String> allKeys = getActiveCameraKeys();
@@ -536,8 +714,7 @@ public class MultiCameraManager {
             return false;
         }
 
-        // 获取录制配置
-        AppConfig appConfig = new AppConfig(context);
+        // 获取录制配置（使用上面已创建的 appConfig）
         long segmentDurationMs = appConfig.getSegmentDurationMs();
         AppLog.d(TAG, "Segment duration: " + (segmentDurationMs / 1000) + " seconds (" + appConfig.getSegmentDurationMinutes() + " minutes)");
         
@@ -603,6 +780,9 @@ public class MultiCameraManager {
         synchronized (sessionLock) {
             sessionConfiguredCount = 0;
             expectedSessionCount = keys.size();
+            // 初始化每个摄像头的配置状态跟踪
+            cameraSessionReady.clear();
+            cameraRecordingActive.clear();
         }
 
         for (String key : keys) {
@@ -611,60 +791,103 @@ public class MultiCameraManager {
             if (camera == null || recorder == null) {
                 continue;
             }
-            camera.setRecordSurface(recorder.getSurface());
+            camera.setRecordSurface(recorder.getSurface(), false);  // MediaRecorder 模式
             camera.recreateSession();
         }
 
-        // 第三步：设置待处理的录制启动任务，等待所有会话配置完成后执行
-        pendingRecordingStart = () -> {
-            AppLog.d(TAG, "Attempting to start recording...");
-            boolean startSuccess = false;
-            int successCount = 0;
+        // 第三步：设置待处理的录制启动任务（将被 executeRecordingStart 替代）
+        final List<String> recordingKeys = new ArrayList<>(keys);
+        pendingRecordingStart = () -> executeRecordingStart(recordingKeys, false);
 
-            for (String key : keys) {
-                VideoRecorder recorder = recorders.get(key);
-                if (recorder != null) {
-                    if (recorder.startRecording()) {
-                        successCount++;
-                        startSuccess = true;  // 至少有一个成功
-                    } else {
-                        AppLog.e(TAG, "Failed to start recording for " + key);
-                    }
-                }
-            }
-
-            if (startSuccess) {
-                isRecording = true;
-                AppLog.d(TAG, successCount + " camera(s) started recording successfully");
-            } else {
-                AppLog.e(TAG, "Failed to start recording on all cameras");
-                isRecording = false;
-                // 清理所有录制器
-                for (String key : keys) {
-                    VideoRecorder recorder = recorders.get(key);
-                    if (recorder != null) {
-                        recorder.release();
-                    }
-                }
-            }
-        };
-
-        // 设置超时机制：如果 3 秒内没有所有会话配置完成，强制启动录制
+        // 设置超时机制：如果 3 秒内没有所有会话配置完成，只启动已就绪的摄像头
         sessionTimeoutRunnable = () -> {
-            AppLog.w(TAG, "Session configuration timeout, starting recording with available cameras");
+            AppLog.w(TAG, "Session configuration timeout after 3 seconds");
             synchronized (sessionLock) {
-                final Runnable recordingTask = pendingRecordingStart;
-                if (recordingTask != null) {
-                    pendingRecordingStart = null;
-                    recordingTask.run();
+                // 标记未响应的摄像头为失败
+                for (String key : recordingKeys) {
+                    if (!cameraSessionReady.containsKey(key)) {
+                        cameraSessionReady.put(key, false);
+                        AppLog.w(TAG, "Camera " + key + " session not configured in time");
+                    }
                 }
-                sessionConfiguredCount = 0;
-                expectedSessionCount = 0;
+                // 执行录制启动（仅已就绪的摄像头）
+                executeRecordingStart(recordingKeys, true);
             }
         };
         mainHandler.postDelayed(sessionTimeoutRunnable, 3000);
 
         return true;
+    }
+    
+    /**
+     * 执行录制启动（仅启动已就绪的摄像头）
+     * @param keys 要启动录制的摄像头 key 列表
+     * @param fromTimeout 是否是从超时触发的
+     */
+    private void executeRecordingStart(List<String> keys, boolean fromTimeout) {
+        Set<String> activeCameras = new HashSet<>();
+        Set<String> failedCameras = new HashSet<>();
+        
+        AppLog.d(TAG, "Executing recording start for " + keys.size() + " cameras" + 
+                (fromTimeout ? " (from timeout)" : ""));
+        
+        for (String key : keys) {
+            // 检查摄像头会话是否已就绪
+            Boolean ready = cameraSessionReady.get(key);
+            if (ready == null || !ready) {
+                // 会话未就绪
+                if (fromTimeout) {
+                    failedCameras.add(key);
+                    AppLog.w(TAG, "Camera " + key + " session not ready, skipping");
+                }
+                continue;
+            }
+            
+            VideoRecorder recorder = recorders.get(key);
+            if (recorder != null) {
+                if (recorder.startRecording()) {
+                    cameraRecordingActive.put(key, true);
+                    activeCameras.add(key);
+                } else {
+                    cameraRecordingActive.put(key, false);
+                    failedCameras.add(key);
+                    AppLog.e(TAG, "Failed to start recording for " + key);
+                }
+            } else {
+                failedCameras.add(key);
+            }
+        }
+        
+        if (!activeCameras.isEmpty()) {
+            isRecording = true;
+            lastNotifiedSegmentIndex = -1;
+            AppLog.d(TAG, activeCameras.size() + " camera(s) started recording successfully: " + activeCameras);
+            
+            // 如果有失败的摄像头，通知上层
+            if (!failedCameras.isEmpty() && recordingStatusCallback != null) {
+                AppLog.w(TAG, failedCameras.size() + " camera(s) failed to start: " + failedCameras);
+                recordingStatusCallback.onPartialRecordingStart(activeCameras, failedCameras);
+            }
+        } else {
+            AppLog.e(TAG, "All cameras failed to start recording");
+            isRecording = false;
+            // 清理所有录制器
+            for (String key : keys) {
+                VideoRecorder recorder = recorders.get(key);
+                if (recorder != null) {
+                    recorder.release();
+                }
+            }
+            // 通知上层完全失败
+            if (statusCallback != null) {
+                statusCallback.onCameraStatusUpdate("all", "recording_failed");
+            }
+        }
+        
+        // 清理状态
+        pendingRecordingStart = null;
+        sessionConfiguredCount = 0;
+        expectedSessionCount = 0;
     }
 
     /**
@@ -676,9 +899,29 @@ public class MultiCameraManager {
     private boolean startCodecRecording(String timestamp, Set<String> enabledCameras) {
         AppLog.d(TAG, "Starting CODEC recording with timestamp: " + timestamp);
 
-        File saveDir = StorageHelper.getVideoDir(context);
+        // 重置首次写入通知标志（每次录制只通知一次）
+        hasNotifiedFirstDataWritten = false;
+
+        // 检查是否使用中转写入模式
+        AppConfig appConfig = new AppConfig(context);
+        useRelayWrite = appConfig.shouldUseRelayWrite();
+        
+        // 获取录制目录（可能是临时目录或最终目录）
+        File saveDir = StorageHelper.getRecordingDir(context);
         if (!saveDir.exists()) {
             saveDir.mkdirs();
+        }
+        
+        // 如果使用中转写入，记录最终目录
+        if (useRelayWrite) {
+            finalSaveDir = StorageHelper.getFinalVideoDir(context);
+            if (!finalSaveDir.exists()) {
+                finalSaveDir.mkdirs();
+            }
+            AppLog.d(TAG, "Codec relay write mode: recording to " + saveDir.getAbsolutePath() + 
+                    ", will transfer to " + finalSaveDir.getAbsolutePath());
+        } else {
+            finalSaveDir = null;
         }
 
         List<String> allKeys = getActiveCameraKeys();
@@ -707,8 +950,7 @@ public class MultiCameraManager {
             return false;
         }
 
-        // 获取录制配置
-        AppConfig appConfig = new AppConfig(context);
+        // 获取录制配置（使用上面已创建的 appConfig）
         long segmentDurationMs = appConfig.getSegmentDurationMs();
         AppLog.d(TAG, "Codec segment duration: " + (segmentDurationMs / 1000) + " seconds (" + appConfig.getSegmentDurationMinutes() + " minutes)");
         
@@ -780,12 +1022,58 @@ public class MultiCameraManager {
                 }
 
                 @Override
-                public void onSegmentSwitch(String cameraId, int newSegmentIndex) {
+                public void onPrepareSegmentSwitch(String cameraId, int currentSegmentIndex) {
+                    AppLog.d(TAG, "Codec prepare segment switch for camera " + cameraId + " (current segment: " + currentSegmentIndex + ")");
+                    // 软编码录制器使用独立的 SurfaceTexture，不需要暂停 Camera CaptureSession
+                    // 但为了一致性，我们记录日志
+                }
+
+                @Override
+                public void onSegmentSwitch(String cameraId, int newSegmentIndex, String completedFilePath) {
                     AppLog.d(TAG, "Codec segment switch for camera " + cameraId + " to segment " + newSegmentIndex);
                     
-                    // 通知分段切换回调（只通知一次，使用第一个摄像头的分段）
-                    if ("front".equals(key) && segmentSwitchCallback != null) {
+                    // 如果使用中转写入，将上一个分段的文件传输到最终目录
+                    if (useRelayWrite && finalSaveDir != null && newSegmentIndex > 0 && completedFilePath != null) {
+                        // 传输已完成的文件（由回调提供确切路径，避免传输正在录制的新文件）
+                        scheduleRelayTransfer(completedFilePath);
+                    }
+                    
+                    // 通知分段切换回调（只通知一次，第一个触发的摄像头会通知）
+                    if (segmentSwitchCallback != null && newSegmentIndex > lastNotifiedSegmentIndex) {
+                        lastNotifiedSegmentIndex = newSegmentIndex;
                         segmentSwitchCallback.onSegmentSwitch(newSegmentIndex);
+                    }
+                }
+
+                @Override
+                public void onCorruptedFilesDeleted(String cameraId, List<String> deletedFiles) {
+                    if (deletedFiles != null && !deletedFiles.isEmpty()) {
+                        AppLog.w(TAG, "Corrupted files deleted for codec camera " + cameraId + ": " + deletedFiles.size() + " file(s)");
+                        for (String file : deletedFiles) {
+                            AppLog.d(TAG, "  Deleted: " + file);
+                        }
+                        // 通知 MainActivity 显示弹窗
+                        if (corruptedFilesCallback != null) {
+                            mainHandler.post(() -> corruptedFilesCallback.onCorruptedFilesDeleted(deletedFiles));
+                        }
+                    }
+                }
+
+                @Override
+                public void onRecordingRebuildRequested(String cameraId, String reason) {
+                    // CodecVideoRecorder 通常不会触发此回调，但为了接口完整性实现
+                    AppLog.e(TAG, "Codec recording rebuild requested for camera " + cameraId + ", reason: " + reason);
+                    // Codec 模式不需要回退，记录日志即可
+                }
+
+                @Override
+                public void onFirstDataWritten(String cameraId) {
+                    AppLog.d(TAG, "Codec first data written for camera " + cameraId);
+                    // 只在第一个摄像头首次写入时通知外部（每次录制只通知一次）
+                    if (!hasNotifiedFirstDataWritten && firstDataWrittenCallback != null) {
+                        hasNotifiedFirstDataWritten = true;
+                        AppLog.d(TAG, "Notifying external: first data written, recording truly started");
+                        mainHandler.post(() -> firstDataWrittenCallback.onFirstDataWritten());
                     }
                 }
             });
@@ -803,7 +1091,7 @@ public class MultiCameraManager {
 
             // 将 SurfaceTexture 设置给 Camera（通过 Surface）
             android.view.Surface recordSurface = new android.view.Surface(surfaceTexture);
-            camera.setRecordSurface(recordSurface);
+            camera.setRecordSurface(recordSurface, true);  // Codec 模式
 
             codecRecorders.put(key, codecRecorder);
         }
@@ -850,6 +1138,7 @@ public class MultiCameraManager {
             }
 
             if (startSuccess) {
+                lastNotifiedSegmentIndex = -1;  // 重置分段通知计数
                 isRecording = true;
                 AppLog.d(TAG, successCount + " camera(s) started codec recording successfully");
             } else {
@@ -885,7 +1174,15 @@ public class MultiCameraManager {
      * 停止录制所有摄像头
      */
     public void stopRecording() {
-        AppLog.d(TAG, "stopRecording called, isRecording=" + isRecording + ", useCodecRecording=" + useCodecRecording);
+        stopRecording(false);
+    }
+
+    /**
+     * 停止录制所有摄像头
+     * @param skipRelayTransfer 是否跳过自动传输（用于远程录制，上传完成后再传输）
+     */
+    public void stopRecording(boolean skipRelayTransfer) {
+        AppLog.d(TAG, "stopRecording called, isRecording=" + isRecording + ", useCodecRecording=" + useCodecRecording + ", skipRelayTransfer=" + skipRelayTransfer);
 
         // 清理待处理的录制启动任务和会话计数器（线程安全处理）
         synchronized (sessionLock) {
@@ -957,29 +1254,379 @@ public class MultiCameraManager {
             }
         }
 
+        // 如果使用中转写入，将临时目录中的所有文件传输到最终目录
+        // 如果 skipRelayTransfer=true（远程录制），则跳过自动传输，由上传逻辑负责传输
+        if (useRelayWrite && finalSaveDir != null && !skipRelayTransfer) {
+            AppLog.d(TAG, "Scheduling relay transfer for remaining files...");
+            // 保存引用，因为 finalSaveDir 会在延迟执行前被清空
+            final File savedFinalDir = finalSaveDir;
+            
+            // 【重要】立即收集当前需要传输的文件列表，避免延迟执行时误传输新创建的文件
+            File tempDir = new File(context.getCacheDir(), FileTransferManager.TEMP_VIDEO_DIR);
+            final File[] filesToTransfer;
+            if (tempDir.exists()) {
+                filesToTransfer = tempDir.listFiles((dir, name) -> name.endsWith(".mp4"));
+            } else {
+                filesToTransfer = null;
+            }
+            
+            // 延迟一点执行，确保文件已经写入完成
+            mainHandler.postDelayed(() -> {
+                transferSpecificTempFiles(savedFinalDir, filesToTransfer);
+            }, 500);
+        } else if (useRelayWrite && skipRelayTransfer) {
+            AppLog.d(TAG, "Skipping relay transfer (will be handled after upload)");
+        }
+
         isRecording = false;
+        useRelayWrite = false;
+        finalSaveDir = null;
+        
+        // 清理 Watchdog 回退状态
+        currentRecordingTimestamp = null;
+        currentEnabledCameras = null;
+        rebuildAttemptCount = 0;
+        isRebuildingRecording = false;  // 重置重建标志
+        
         AppLog.d(TAG, "All cameras stopped recording");
     }
 
     /**
+     * 处理录制重建请求（Watchdog 触发）
+     * 
+     * 重建策略：
+     * 1. 第一次触发：尝试重建 MediaRecorder（不切换模式）
+     * 2. 第二次触发：如果录制模式为"自动"，则切换到 Codec 模式
+     * 3. 已在 Codec 模式或非自动模式：不再处理
+     * 
+     * 注意：多个摄像头可能同时触发此方法，需要防重入保护
+     * 
+     * @param cameraId 触发重建的相机ID
+     * @param reason 重建原因
+     */
+    private void handleRecordingRebuildRequest(String cameraId, String reason) {
+        // 【关键】防重入保护：多个摄像头可能同时触发 Watchdog
+        // 只处理第一个触发的请求，忽略后续的
+        synchronized (this) {
+            if (isRebuildingRecording) {
+                AppLog.w(TAG, "Recording rebuild already in progress, ignoring request from camera " + cameraId);
+                return;
+            }
+            isRebuildingRecording = true;
+        }
+        
+        rebuildAttemptCount++;
+        AppLog.w(TAG, "Handling recording rebuild request from camera " + cameraId + 
+                ", reason: " + reason + ", attempt: " + rebuildAttemptCount);
+        
+        // 如果已经在 Codec 模式，则不再处理
+        if (useCodecRecording) {
+            AppLog.w(TAG, "Already using Codec recording, no further fallback available");
+            isRebuildingRecording = false;
+            return;
+        }
+        
+        // 保存当前录制参数
+        final String savedTimestamp = currentRecordingTimestamp;
+        final Set<String> savedEnabledCameras = currentEnabledCameras;
+        
+        if (savedTimestamp == null) {
+            AppLog.w(TAG, "No recording timestamp saved, cannot rebuild");
+            isRebuildingRecording = false;
+            return;
+        }
+        
+        // 停止当前录制（不清理状态）
+        stopRecordingForRebuild();
+        
+        // 注意：不自动清除调试标志，让用户通过 UI 手动控制
+        // 调试模式作为持久开关，直到用户手动关闭
+        
+        // 检查是否需要回退到 Codec
+        if (rebuildAttemptCount >= CODEC_FALLBACK_THRESHOLD) {
+            // 达到阈值，检查是否可以回退到 Codec
+            AppConfig appConfig = new AppConfig(context);
+            String recordingMode = appConfig.getRecordingMode();
+            
+            if (AppConfig.RECORDING_MODE_AUTO.equals(recordingMode)) {
+                // 自动模式：切换到 Codec 录制
+                AppLog.w(TAG, "Rebuild attempt " + rebuildAttemptCount + " failed, switching to Codec mode...");
+                
+                mainHandler.postDelayed(() -> {
+                    try {
+                        // 生成新的时间戳（避免文件名冲突）
+                        String newTimestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+                        
+                        AppLog.d(TAG, "Restarting recording with Codec mode, new timestamp: " + newTimestamp);
+                        useCodecRecording = true;  // 切换到 Codec 模式
+                        startCodecRecording(newTimestamp, savedEnabledCameras);
+                        
+                        // 通知外部时间戳已更新（用于远程录制查找文件）
+                        if (timestampUpdateCallback != null) {
+                            timestampUpdateCallback.onTimestampUpdated(newTimestamp);
+                        }
+                        
+                        // 通知外部发生了 Codec 回退
+                        if (codecFallbackCallback != null) {
+                            codecFallbackCallback.onCodecFallback();
+                        }
+                    } finally {
+                        isRebuildingRecording = false;  // 重建完成
+                    }
+                }, 500);
+            } else {
+                // 非自动模式，只能再次尝试 MediaRecorder
+                AppLog.w(TAG, "Recording mode is '" + recordingMode + "' (not auto), retrying MediaRecorder...");
+                
+                mainHandler.postDelayed(() -> {
+                    try {
+                        String newTimestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+                        AppLog.d(TAG, "Retrying MediaRecorder recording, new timestamp: " + newTimestamp);
+                        startMediaRecorderRecording(newTimestamp, savedEnabledCameras);
+                        
+                        // 通知外部时间戳已更新（用于远程录制查找文件）
+                        if (timestampUpdateCallback != null) {
+                            timestampUpdateCallback.onTimestampUpdated(newTimestamp);
+                        }
+                    } finally {
+                        isRebuildingRecording = false;  // 重建完成
+                    }
+                }, 500);
+            }
+        } else {
+            // 未达到阈值，先尝试重建 MediaRecorder
+            AppLog.w(TAG, "Rebuild attempt " + rebuildAttemptCount + ", retrying MediaRecorder first...");
+            
+            mainHandler.postDelayed(() -> {
+                try {
+                    // 生成新的时间戳（避免文件名冲突）
+                    String newTimestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+                    
+                    AppLog.d(TAG, "Restarting recording with MediaRecorder, new timestamp: " + newTimestamp);
+                    startMediaRecorderRecording(newTimestamp, savedEnabledCameras);
+                    
+                    // 通知外部时间戳已更新（用于远程录制查找文件）
+                    if (timestampUpdateCallback != null) {
+                        timestampUpdateCallback.onTimestampUpdated(newTimestamp);
+                    }
+                } finally {
+                    isRebuildingRecording = false;  // 重建完成
+                }
+            }, 500);
+        }
+    }
+    
+    /**
+     * 为重建停止录制（不清理 Watchdog 状态）
+     * 使用 reset() 而不是 release()，以便保留 Handler/Thread 供重建时使用
+     */
+    private void stopRecordingForRebuild() {
+        AppLog.d(TAG, "Stopping recording for rebuild...");
+        
+        List<String> keys = getActiveCameraKeys();
+        
+        // 重置 MediaRecorder 录制器（保留 Handler/Thread）
+        for (String key : keys) {
+            VideoRecorder recorder = recorders.get(key);
+            if (recorder != null) {
+                recorder.reset();  // 重置而不是释放，保留 Handler/Thread
+            }
+        }
+        
+        // 清理摄像头会话
+        for (String key : keys) {
+            SingleCamera camera = cameras.get(key);
+            if (camera != null) {
+                camera.clearRecordSurface();
+                camera.recreateSession();
+            }
+        }
+        
+        isRecording = false;
+    }
+    
+    /**
+     * 调度将指定的已完成文件传输到最终目录
+     * @param completedFilePath 已完成录制的文件完整路径
+     */
+    private void scheduleRelayTransfer(String completedFilePath) {
+        if (finalSaveDir == null || completedFilePath == null) {
+            return;
+        }
+        
+        File tempFile = new File(completedFilePath);
+        if (!tempFile.exists()) {
+            AppLog.w(TAG, "Completed file does not exist: " + completedFilePath);
+            return;
+        }
+        
+        // 检查文件大小，避免传输空文件或损坏文件
+        if (tempFile.length() < 1024) {
+            AppLog.w(TAG, "Completed file too small, skipping transfer: " + completedFilePath + " (" + tempFile.length() + " bytes)");
+            return;
+        }
+        
+        File targetFile = new File(finalSaveDir, tempFile.getName());
+        
+        AppLog.d(TAG, "Scheduling relay transfer: " + tempFile.getName() + 
+                " -> " + targetFile.getAbsolutePath());
+        
+        FileTransferManager transferManager = FileTransferManager.getInstance(context);
+        transferManager.addTransferTask(tempFile, targetFile, 
+                new FileTransferManager.TransferCallback() {
+            @Override
+            public void onTransferComplete(File sourceFile, File targetFile) {
+                AppLog.d(TAG, "Relay transfer complete: " + targetFile.getName());
+            }
+            
+            @Override
+            public void onTransferFailed(File sourceFile, File targetFile, String error) {
+                AppLog.e(TAG, "Relay transfer failed: " + sourceFile.getName() + " - " + error);
+            }
+        });
+    }
+    
+    /**
+     * 将临时目录中的所有视频文件传输到最终目录
+     * @param targetDir 目标目录
+     */
+    private void transferAllTempFiles(File targetDir) {
+        if (targetDir == null) {
+            AppLog.w(TAG, "Target directory is null, skipping transfer");
+            return;
+        }
+        
+        File tempDir = new File(context.getCacheDir(), FileTransferManager.TEMP_VIDEO_DIR);
+        if (!tempDir.exists()) {
+            AppLog.d(TAG, "Temp directory does not exist");
+            return;
+        }
+        
+        File[] files = tempDir.listFiles((dir, name) -> name.endsWith(".mp4"));
+        transferSpecificTempFiles(targetDir, files);
+    }
+    
+    /**
+     * 将指定的临时视频文件传输到最终目录
+     * 【重要】此方法只传输预先指定的文件列表，避免传输在调用后新创建的文件
+     * @param targetDir 目标目录
+     * @param files 要传输的文件列表（在调用前收集）
+     */
+    private void transferSpecificTempFiles(File targetDir, File[] files) {
+        if (targetDir == null) {
+            AppLog.w(TAG, "Target directory is null, skipping transfer");
+            return;
+        }
+        
+        if (files == null || files.length == 0) {
+            AppLog.d(TAG, "No temp files to transfer");
+            return;
+        }
+        
+        AppLog.d(TAG, "Transferring " + files.length + " temp file(s) to " + targetDir.getAbsolutePath());
+        
+        FileTransferManager transferManager = FileTransferManager.getInstance(context);
+        
+        for (File tempFile : files) {
+            // 检查文件是否仍然存在（可能已经被删除或移动）
+            if (!tempFile.exists()) {
+                AppLog.d(TAG, "Skipping non-existent file: " + tempFile.getName());
+                continue;
+            }
+            
+            // 跳过空文件（可能是正在被其他录制使用的新文件）
+            if (tempFile.length() == 0) {
+                AppLog.d(TAG, "Skipping empty file (may be in use): " + tempFile.getName());
+                continue;
+            }
+            
+            File targetFile = new File(targetDir, tempFile.getName());
+            
+            transferManager.addTransferTask(tempFile, targetFile, 
+                    new FileTransferManager.TransferCallback() {
+                @Override
+                public void onTransferComplete(File sourceFile, File targetFile) {
+                    AppLog.d(TAG, "Transfer complete: " + targetFile.getName());
+                }
+                
+                @Override
+                public void onTransferFailed(File sourceFile, File targetFile, String error) {
+                    AppLog.e(TAG, "Transfer failed: " + sourceFile.getName() + " - " + error);
+                }
+            });
+        }
+    }
+
+    /**
      * 释放所有资源
+     * 添加完善的清理逻辑和异常保护
      */
     public void release() {
-        stopRecording();
-        closeAllCameras();
-
-        for (VideoRecorder recorder : recorders.values()) {
-            recorder.release();
+        AppLog.d(TAG, "Releasing MultiCameraManager resources");
+        
+        try {
+            // 1. 首先清理所有待执行的 Handler 任务（防止内存泄漏）
+            if (mainHandler != null) {
+                mainHandler.removeCallbacksAndMessages(null);
+            }
+            
+            // 2. 清理超时 Runnable 引用
+            if (sessionTimeoutRunnable != null) {
+                sessionTimeoutRunnable = null;
+            }
+            pendingRecordingStart = null;
+            
+            // 3. 重置会话配置计数器
+            synchronized (sessionLock) {
+                sessionConfiguredCount = 0;
+                expectedSessionCount = 0;
+            }
+            
+            // 4. 停止录制
+            try {
+                stopRecording();
+            } catch (Exception e) {
+                AppLog.e(TAG, "Error stopping recording during release", e);
+            }
+            
+            // 5. 关闭所有摄像头
+            try {
+                closeAllCameras();
+            } catch (Exception e) {
+                AppLog.e(TAG, "Error closing cameras during release", e);
+            }
+            
+            // 6. 释放 VideoRecorder
+            for (VideoRecorder recorder : recorders.values()) {
+                try {
+                    recorder.release();
+                } catch (Exception e) {
+                    AppLog.e(TAG, "Error releasing VideoRecorder", e);
+                }
+            }
+            
+            // 7. 释放 CodecVideoRecorder
+            for (CodecVideoRecorder codecRecorder : codecRecorders.values()) {
+                try {
+                    codecRecorder.release();
+                } catch (Exception e) {
+                    AppLog.e(TAG, "Error releasing CodecVideoRecorder", e);
+                }
+            }
+            
+        } catch (Exception e) {
+            AppLog.e(TAG, "Unexpected error during release", e);
+        } finally {
+            // 8. 清理集合（确保执行）
+            cameras.clear();
+            recorders.clear();
+            codecRecorders.clear();
+            isRecording = false;
+            isRebuildingRecording = false;
+            currentRecordingTimestamp = null;
+            currentEnabledCameras = null;
+            AppLog.d(TAG, "All resources released");
         }
-
-        for (CodecVideoRecorder codecRecorder : codecRecorders.values()) {
-            codecRecorder.release();
-        }
-
-        cameras.clear();
-        recorders.clear();
-        codecRecorders.clear();
-        AppLog.d(TAG, "All resources released");
     }
 
     /**
