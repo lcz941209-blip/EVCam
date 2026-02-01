@@ -48,6 +48,8 @@ import com.kooo.evcam.wechat.WechatMiniConfig;
 import com.kooo.evcam.wechat.WechatRemoteManager;
 import com.kooo.evcam.remote.RemoteCommandDispatcher;
 import com.kooo.evcam.remote.handler.RemoteCommandHandler;
+import com.kooo.evcam.playback.PlaybackFragmentNew;
+import com.kooo.evcam.playback.PhotoPlaybackFragmentNew;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -1372,6 +1374,49 @@ public class MainActivity extends AppCompatActivity implements WechatRemoteManag
         });
         
         AppLog.d(TAG, "RemoteCommandDispatcher 初始化完成");
+        
+        // 从 RemoteServiceManager 同步已运行服务的 API 客户端
+        // 这确保 Activity 重建后，远程命令处理器能正确使用已有的 API 客户端
+        syncApiClientsFromRemoteServiceManager();
+    }
+    
+    /**
+     * 从 RemoteServiceManager 同步已运行服务的 API 客户端
+     * 在 Activity 重建时，远程服务可能已在运行，需要同步到新的 remoteCommandDispatcher
+     */
+    private void syncApiClientsFromRemoteServiceManager() {
+        if (remoteCommandDispatcher == null) {
+            return;
+        }
+        
+        RemoteServiceManager serviceManager = RemoteServiceManager.getInstance();
+        
+        // 同步钉钉 API 客户端
+        DingTalkApiClient dingTalk = serviceManager.getDingTalkApiClient();
+        if (dingTalk != null) {
+            remoteCommandDispatcher.setDingTalkApiClient(dingTalk);
+            this.dingTalkApiClient = dingTalk;  // 同时更新本地引用
+            this.dingTalkStreamManager = serviceManager.getDingTalkStreamManager();
+            AppLog.d(TAG, "从 RemoteServiceManager 同步钉钉 API 客户端");
+        }
+        
+        // 同步 Telegram API 客户端
+        com.kooo.evcam.telegram.TelegramApiClient telegram = serviceManager.getTelegramApiClient();
+        if (telegram != null) {
+            remoteCommandDispatcher.setTelegramApiClient(telegram);
+            this.telegramApiClient = telegram;
+            this.telegramBotManager = serviceManager.getTelegramBotManager();
+            AppLog.d(TAG, "从 RemoteServiceManager 同步 Telegram API 客户端");
+        }
+        
+        // 同步飞书 API 客户端
+        com.kooo.evcam.feishu.FeishuApiClient feishu = serviceManager.getFeishuApiClient();
+        if (feishu != null) {
+            remoteCommandDispatcher.setFeishuApiClient(feishu);
+            this.feishuApiClient = feishu;
+            this.feishuBotManager = serviceManager.getFeishuBotManager();
+            AppLog.d(TAG, "从 RemoteServiceManager 同步飞书 API 客户端");
+        }
     }
     
     /**
@@ -1615,32 +1660,32 @@ public class MainActivity extends AppCompatActivity implements WechatRemoteManag
     }
 
     /**
-     * 显示回看界面
+     * 显示回看界面（新版四宫格界面）
      */
     private void showPlaybackInterface() {
         // 隐藏录制布局，显示Fragment容器
         recordingLayout.setVisibility(View.GONE);
         fragmentContainer.setVisibility(View.VISIBLE);
 
-        // 显示PlaybackFragment
+        // 显示新版PlaybackFragment（支持四宫格预览）
         FragmentManager fragmentManager = getSupportFragmentManager();
         FragmentTransaction transaction = fragmentManager.beginTransaction();
-        transaction.replace(R.id.fragment_container, new PlaybackFragment());
+        transaction.replace(R.id.fragment_container, new PlaybackFragmentNew());
         transaction.commit();
     }
 
     /**
-     * 显示图片回看界面
+     * 显示图片回看界面（新版四宫格界面）
      */
     private void showPhotoPlaybackInterface() {
         // 隐藏录制布局，显示Fragment容器
         recordingLayout.setVisibility(View.GONE);
         fragmentContainer.setVisibility(View.VISIBLE);
 
-        // 显示PhotoPlaybackFragment
+        // 显示新版PhotoPlaybackFragment（支持四宫格预览）
         FragmentManager fragmentManager = getSupportFragmentManager();
         FragmentTransaction transaction = fragmentManager.beginTransaction();
-        transaction.replace(R.id.fragment_container, new PhotoPlaybackFragment());
+        transaction.replace(R.id.fragment_container, new PhotoPlaybackFragmentNew());
         transaction.commit();
     }
 
@@ -1810,6 +1855,13 @@ public class MainActivity extends AppCompatActivity implements WechatRemoteManag
     private void executeWechatCommand(String action, String commandId, int durationSeconds) {
         if (wechatRemoteManager != null) {
             wechatRemoteManager.setCommandExecutor(this);
+            
+            // 确保微信云服务已启动（Activity 重建后可能未启动）
+            if (!wechatRemoteManager.isRunning() && wechatMiniConfig != null && wechatMiniConfig.isCloudConfigured()) {
+                AppLog.d(TAG, "微信云服务未运行，尝试启动...");
+                wechatRemoteManager.startService();
+            }
+            
             wechatRemoteManager.executeCommandFromIntent(action, commandId, durationSeconds);
         }
     }
@@ -3839,9 +3891,9 @@ public class MainActivity extends AppCompatActivity implements WechatRemoteManag
         
         // 根据是否正在录制，决定如何处理摄像头
         if (cameraManager != null) {
-            if (isRecording) {
-                // 正在录制：保持摄像头连接（有前台服务保护）
-                AppLog.d(TAG, "Recording in progress, keeping cameras connected (protected by foreground service)");
+            if (isRecording || isRemoteRecording) {
+                // 正在录制（手动或远程）：保持摄像头连接（有前台服务保护）
+                AppLog.d(TAG, "Recording in progress (manual=" + isRecording + ", remote=" + isRemoteRecording + "), keeping cameras connected");
             } else if (isAutoRecordingPending) {
                 // 自动录制正在等待中：保持摄像头连接（开机自启动场景）
                 AppLog.d(TAG, "Auto recording pending, keeping cameras connected for startup recording");
